@@ -26,6 +26,8 @@ before_install:
   - pip install pycodestyle
   - pycodestyle --exclude=".git,.tox,__pycache,venv,.eggs,build,jupyterhub_config.py"
 install:
+  # TODO: remove when Travis env comes with a version of six >=1.12 (graphene)
+  - pip install six>=1.12
   - pip install .[all]
 script:
   - python setup.py test
