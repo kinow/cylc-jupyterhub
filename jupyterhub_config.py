@@ -56,3 +56,9 @@ c.JupyterHub.template_paths = [
         'templates'
     )
 ]
+
+c.JupyterHub.log_level = 'DEBUG'
+c.Spawner.debug = True
+c.LocalProcessSpawner.debug = True
+c.ConfigurableHTTPProxy.debug = True
+

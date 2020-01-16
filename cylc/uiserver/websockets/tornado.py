@@ -4,6 +4,8 @@
 # The file was copied from this revision:
 # https://github.com/graphql-python/graphql-ws/blob/cf560b9a5d18d4a3908dc2cfe2199766cc988fef/graphql_ws/tornado.py
 
+import logging
+
 from inspect import isawaitable
 
 from asyncio import ensure_future, gather, wait, shield
@@ -21,18 +23,35 @@ from typing import Union, Awaitable, Any, List, Tuple, Dict
 
 setup_observable_extension()
 
+logger = logging.getLogger(__name__)
+
 
 class TornadoConnectionContext(BaseConnectionContext):
+    def __init__(self, ws, request_context=None):
+        super().__init__(ws, request_context)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"Creating a new connection context for: {ws.handler_id}. Is ws_connection set? "
+                         f"{ws.ws_connection is not None}")
+
     async def receive(self):
         try:
             msg = await self.ws.recv()
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"Received message {msg}")
             return msg
         except WebSocketClosedError:
+            logger.exception("Error receiving the message!")
             raise ConnectionClosedException()
 
     async def send(self, data):
         if self.closed:
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"Connection context closed. Is ws_connection set? {self.ws.ws_connection is not None}")
+                logger.debug(f"Not sending data: {data}")
             return
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"Is ws_connection set? {self.ws.ws_connection is None}")
+            logger.debug(f"Sending data: {data}")
         await self.ws.write_message(data)
 
     @property
@@ -40,13 +59,16 @@ class TornadoConnectionContext(BaseConnectionContext):
         return self.ws.close_code is not None
 
     async def close(self, code):
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"Closing connection context: {code}")
         await self.ws.close(code)
 
 
 class TornadoSubscriptionServer(BaseSubscriptionServer):
     def __init__(self, schema, keep_alive=True, loop=None):
-        self.loop = loop
         super().__init__(schema, keep_alive)
+        self.loop = loop
+        logger.info("Creating new Subscription server...")
 
     def get_graphql_params(self, *args, **kwargs):
         params = super(TornadoSubscriptionServer,
@@ -60,9 +82,12 @@ class TornadoSubscriptionServer(BaseSubscriptionServer):
         while True:
             try:
                 if connection_context.closed:
+                    logger.warning("Connection context closed. Exiting Subscription Server main loop.")
                     raise ConnectionClosedException()
+                # Take the next message from the WebSocketHandler's queue...
                 message = await connection_context.receive()
             except ConnectionClosedException:
+                logger.exception("Error while retrieving WebSocketHandler queue message...")
                 break
             finally:
                 if pending:
@@ -93,17 +118,48 @@ class TornadoSubscriptionServer(BaseSubscriptionServer):
     async def on_connection_init(self, connection_context, op_id, payload):
         try:
             await self.on_connect(connection_context, payload)
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"Initializing connection. Sending ACK.")
             await self.send_message(connection_context, op_type=GQL_CONNECTION_ACK)
         except Exception as e:
+            logger.exception("Error sending ACK")
             await self.send_error(connection_context, op_id, e, GQL_CONNECTION_ERROR)
             await connection_context.close(1011)
 
-    def execute(self, request_context, params):
+    async def on_start(self, connection_context, op_id, params):
+        execution_result = self.execute(
+            connection_context.request_context, params)
+
+        if isawaitable(execution_result):
+            execution_result = await execution_result
+
+        if not hasattr(execution_result, '__aiter__'):
+            await self.send_execution_result(connection_context, op_id, execution_result)
+        else:
+            iterator = await execution_result.__aiter__()
+            connection_context.register_operation(op_id, iterator)
+            async for single_result in iterator:
+                if not connection_context.has_operation(op_id):
+                    break
+                await self.send_execution_result(connection_context, op_id, single_result)
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"Message handled, sending COMPLETE.")
+            await self.send_message(connection_context, op_id, GQL_COMPLETE)
+
+    async def on_stop(self, connection_context, op_id):
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"Stopping Subscription Server!")
+        self.unsubscribe(connection_context, op_id)
+
+    # --- The following functions are not from the Tornado PR. These were necessary
+    #     as per comment in the ``send_execution_result`` function.
+
+    def execute_(self, request_context, params):
         params['context_value'] = request_context
         return super().execute(request_context, params)
 
-    async def send_execution_result(self, connection_context, op_id,
-                              execution_result):
+    async def send_execution_result_(self, connection_context, op_id,
+                                    execution_result):
         """
         Our schema contains a subscription ObjectType that contains other
         ObjectType's. These are resolved with functions that are awaitable,
@@ -143,6 +199,8 @@ class TornadoSubscriptionServer(BaseSubscriptionServer):
 
         await gather(*resolving_items)
 
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"Sending DATA.")
         await super().send_execution_result(connection_context, op_id,
                                             execution_result)
 
@@ -187,24 +245,3 @@ class TornadoSubscriptionServer(BaseSubscriptionServer):
             )
             for key, value in item.items()
         )
-
-    async def on_start(self, connection_context, op_id, params):
-        execution_result = self.execute(
-            connection_context.request_context, params)
-
-        if isawaitable(execution_result):
-            execution_result = await execution_result
-
-        if not hasattr(execution_result, '__aiter__'):
-            await self.send_execution_result(connection_context, op_id, execution_result)
-        else:
-            iterator = await execution_result.__aiter__()
-            connection_context.register_operation(op_id, iterator)
-            async for single_result in iterator:
-                if not connection_context.has_operation(op_id):
-                    break
-                await self.send_execution_result(connection_context, op_id, single_result)
-            await self.send_message(connection_context, op_id, GQL_COMPLETE)
-
-    async def on_stop(self, connection_context, op_id):
-        self.unsubscribe(connection_context, op_id)

@@ -114,6 +114,10 @@ class UIServerGraphQLHandler(HubOAuthenticated, TornadoGraphQLHandler):
         super().prepare()
 
 
+from itertools import count
+handlers_ids = count()
+
+
 class SubscriptionHandler(websocket.WebSocketHandler):
     subscription_server = None
     resolvers = None
@@ -122,6 +126,7 @@ class SubscriptionHandler(websocket.WebSocketHandler):
     def initialize(self, sub_server, resolvers):
         self.subscription_server = sub_server
         self.resolvers = resolvers
+        self.handler_id = f"SubscriptionHandler-{next(handlers_ids)}"
 
     def select_subprotocol(self, subprotocols):
         return GRAPHQL_WS
